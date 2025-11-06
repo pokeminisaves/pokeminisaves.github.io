@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pokémon Mini EEPROM Manager</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Arial", Roboto, Helvetica, Arial, sans-serif; 
+            max-width: 400px; 
+            margin: 0 auto; 
+            background-color: #000; 
+            color: #FFF; 
+            padding: 5px; 
+            min-height: 100vh; 
+            box-sizing: border-box;
+        }
+        h1 { font-size: 20px; }
+        h2 { margin-top: 30px; color: #13a047; }
+        button { padding: 10px 25px; border: none; border-radius: 3px; cursor: pointer; font-weight: bold; transition: background-color 0.2s; }
+        #exportEEPROMButton { background-color: #1e88e5; color: white; }
+        #exportEEPROMButton:disabled { background-color: #bbbbbb; cursor: not-allowed; }
+        #exportEEPROMButton:not(:disabled):hover { background-color: #0d47a1; }
+        #eepromFileInput { display: none; }
+        .slot-container { 
+            border: 1px solid #aaa; 
+            padding: 15px; 
+            margin-bottom: 12px; 
+            border-radius: 8px; 
+            background-color: #222; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05); 
+            transition: all 0.2s ease-in-out; 
+            cursor: pointer; 
+            position: relative; 
+        }
+        .slot-modified { 
+            border-color: #1F00FF;
+            background-color: #0D006B;
+        }
+        .slot-header { font-weight: bold; margin-bottom: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .slot-actions button { margin-left: 5px; }
+        .slot-actions .export-slot-btn { 
+            background-color: #316E33; 
+            color: white;
+        }
+        .slot-actions .export-slot-btn:hover {
+            background-color: #1F4520; 
+        }
+        .slot-actions .replace-btn { 
+            background-color: #8A1802;
+            color: white;
+        }
+        .slot-actions .replace-btn:hover {
+            background-color: #520E00; 
+        }
+        .filename-display { font-family: monospace; background: #000; padding: 8px; border-radius: 4px; border: 1px solid #aaa; margin-top: 8px; font-size: 15px; }
+        .game-name { 
+            font-family: inherit; 
+            font-weight: bold;
+            color: #1e88e5; 
+            margin-bottom: 5px;
+        }
+        #statusMessage {
+            padding: 5px 0;
+            border-radius: 4px;
+        }
+        .error { color: #d32f2f; font-weight: bold; }
+        .success { color: #388e3c; font-weight: bold; }
+        body.drag-over-pme {
+            box-shadow: inset 0 0 100px rgba(30, 136, 229, 0.4); 
+            border: 2px dashed #1e88e5; 
+        }
+        body.pme-drop-inactive {
+            box-shadow: none;
+            border: 2px dashed #222; 
+            cursor: default !important;
+        }
+        .slot-container.drag-over-save {
+            border: 2px dashed #ffc107;
+            background-color: #333;
+        }
+    </style>
+</head>
+<body id="mainBody">
+    <h1>Pokémon Mini EEPROM Manager</h1>
+    <div id="controls">
+        <input type="file" id="eepromFileInput" accept=".pme,.eep" onchange="handleFileLoad(this.files[0])">
+        <button onclick="document.getElementById('eepromFileInput').click()">Import .PME file</button>
+        <button id="exportEEPROMButton" onclick="exportModifiedEEPROM()" disabled>Export modified .PME</button>
+    </div>
+    <br>
+    <div id="statusMessage" class="success"></div>
+    <br>
+    <div id="slotsContainer">
+    </div>
+    <script>
+        const SAVE_SLOT_COUNT = 6;
+        const EEPROM_HEADER_ID_LENGTH = 4; 
+        const FILENAME_LENGTH = 0x11; 
+        const FILENAME_SEPARATOR_LENGTH = 1; 
+        const FILENAME_START_OFFSET = EEPROM_HEADER_ID_LENGTH; 
+        const SAVE_DATA_START_OFFSET = 0x82; 
+        const SAVE_DATA_SIZE = 1280; 
+        const EXPORTED_FILENAME_LENGTH = FILENAME_LENGTH; 
+        const EXPORTED_SAVE_FILE_SIZE = SAVE_DATA_SIZE + EXPORTED_FILENAME_LENGTH; 
+        const EXPECTED_MIN_SIZE = 8192; 
+        let currentEEPROMData = null; 
+        let slotNames = []; 
+        let slotModifiedStatus = []; 
+        let dragCounter = 0; 
+        const SAVE_FILE_DICTIONARY = {
+			"MPTJ": "Pokémon Party Mini (JPN)",
+			"MPTE": "Pokémon Party Mini (USA/AUS)",
+			"MPTP": "Pokémon Party Mini (EUR)",
+			"MPBJ": "Pokémon Pinball Mini (JPN)",
+            "MPBE": "Pokémon Pinball Mini (USA/EUR/AUS)",
+			"MPZJ": "Pokémon Puzzle Collection Vol. 1 (JPN)",
+			"MPZE": "Pokémon Puzzle Collection Vol. 1 (USA/EUR/AUS)",
+			"MPZF": "Pokémon Puzzle Collection Vol. 1 (FRE)",
+			"MPZD": "Pokémon Puzzle Collection Vol. 1 (GER)",
+			"MSTP": "Pokémon Tetris (EUR)",
+			"MSTJ": "Pokémon Shock Tetris (JPN)",
+			"MZ2J": "Pokémon Puzzle Collection Vol. 2",
+			"MRCJ": "Pokémon Race Mini (JPN)",
+			"MRCE": "Pokémon Race Mini (Fan Translation)",
+			"MBRJ": "Pichu Bros. mini (JPN)",
+			"MBRE": "Pichu Bros. mini (Fan Translation)",
+			"MTAJ": "Togepi's Great Adventure (JPN)",
+			"MTAE": "Togepi's Great Adventure (Fan Translation)",
+			"MSDJ": "Pokémon Breeder mini (JPN)",
+			"MSDE": "Pokémon Breeder mini (Fan Translation)",
+            "MLTE": "Snorlax's Lunch Time (USA/EUR)",
+			"MLTJ": "Snorlax's Lunch Time (JPN)",
+            "HmBw": "Pokémon Psychic Seeds (Homebrew)",
+			"LUPI": "Lights Out (Homebrew)"
+        };
+        function getFriendlyGameName(rawName) {
+            const key = rawName.substring(0, 4).trim();
+            return SAVE_FILE_DICTIONARY[key] || "Unknown Game";
+        }
+        function updateExportButtonState() {
+            const exportButton = document.getElementById('exportEEPROMButton');
+            const isFileLoaded = currentEEPROMData !== null;
+            const isModified = slotModifiedStatus.includes(true); 
+            exportButton.disabled = !(isFileLoaded && isModified);
+        }
+        function bytesToTrimmedString(byteArray) {
+            let decoder;
+            let isShiftJIS = false;
+            for (let i = 0; i < byteArray.length; i++) {
+                const byte = byteArray[i];
+                if ((byte >= 0x81 && byte <= 0x9F) || (byte >= 0xE0 && byte <= 0xFC)) {
+                    isShiftJIS = true;
+                    break;
+                }
+            }
+            if (isShiftJIS) {
+                decoder = new TextDecoder('shift-jis');
+            } else {
+                decoder = new TextDecoder('ascii');
+            }
+            let str = decoder.decode(byteArray);
+            return str.replace(/\0/g, '').trim();
+        }
+        function downloadFile(data, filename, type) {
+            const blob = new Blob([data], { type: type });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        function handleFileLoad(file) {
+            if (!file) {
+                document.getElementById('statusMessage').className = 'error';
+                document.getElementById('statusMessage').textContent = "No file selected.";
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const buffer = event.target.result;
+                currentEEPROMData = new Uint8Array(buffer);
+                const headerBytes = currentEEPROMData.slice(0, EEPROM_HEADER_ID_LENGTH);
+                const headerString = bytesToTrimmedString(headerBytes);
+                if (headerString !== "GBMN") {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = `Invalid EEPROM header. Expected 'GBMN', got '${headerString}'.`;
+                    currentEEPROMData = null; 
+                    updateExportButtonState(); 
+                    document.getElementById('slotsContainer').innerHTML = '';
+                    setupPmeDragDrop(true); 
+                    return;
+                }
+                if (currentEEPROMData.length < EXPECTED_MIN_SIZE) {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = `File too small. Expected exactly ${EXPECTED_MIN_SIZE} bytes (8KB), got ${currentEEPROMData.length}.`;
+                    currentEEPROMData = null; 
+                    updateExportButtonState(); 
+                    document.getElementById('slotsContainer').innerHTML = '';
+                    setupPmeDragDrop(true);
+                    return;
+                }
+                slotModifiedStatus = new Array(SAVE_SLOT_COUNT).fill(false);
+                document.getElementById('statusMessage').className = 'success';
+                document.getElementById('statusMessage').textContent = `EEPROM loaded successfully!`;
+                updateExportButtonState(); 
+                displaySaveSlots(currentEEPROMData);
+                setupPmeDragDrop(false); 
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        function displaySaveSlots(data) {
+            const container = document.getElementById('slotsContainer');
+            container.innerHTML = ''; 
+            slotNames = [];
+            let currentOffset = FILENAME_START_OFFSET; 
+            for (let i = 0; i < SAVE_SLOT_COUNT; i++) {
+                const filenameBytes = data.slice(currentOffset, currentOffset + FILENAME_LENGTH);
+                const fullFilename = bytesToTrimmedString(filenameBytes); 
+                slotNames.push(fullFilename); 
+                renderSlotUI(i, fullFilename);
+                currentOffset += FILENAME_LENGTH; 
+                if (i < SAVE_SLOT_COUNT - 1) { 
+                    currentOffset += FILENAME_SEPARATOR_LENGTH; 
+                }
+            }
+        }
+        function renderSlotUI(index, fullFileName) { 
+            const container = document.getElementById('slotsContainer');
+            const slotDiv = document.createElement('div');
+            const friendlyName = getFriendlyGameName(fullFileName);
+            const rawGameID = fullFileName.length > 0 
+                ? fullFileName.substring(0, fullFileName.length - 1).trim() 
+                : '[EMPTY]';
+            slotDiv.id = `slot-container-${index}`;
+            slotDiv.className = `slot-container ${slotModifiedStatus[index] ? 'slot-modified' : ''}`;
+            slotDiv.dataset.slotIndex = index; 
+            slotDiv.innerHTML = `
+                <div class="slot-header">
+                    <span>Slot ${index + 1}</span>
+                    <div class="slot-actions">
+                        <button class="replace-btn" onclick="document.getElementById('replaceSlotInput_${index}').click()">Replace</button>
+                        <button class="export-slot-btn" onclick="exportSaveSlot(${index})">Export</button>
+                        <input type="file" id="replaceSlotInput_${index}" accept=".gbmnsave" style="display:none;" 
+                                 onchange="handleSlotReplace(${index}, this.files[0])">
+                    </div>
+                </div>
+                <div class="game-name">${friendlyName}</div>
+                <div class="filename-display" id="slot-name-${index}">${rawGameID}</div>
+            `;
+            container.appendChild(slotDiv);
+        }
+        function exportSaveSlot(slotIndex) {
+            if (!currentEEPROMData) {
+                 document.getElementById('statusMessage').className = 'error';
+                 document.getElementById('statusMessage').textContent = "Error: Please load an EEPROM file first.";
+                 return;
+            }
+            const filenameStartInHeader = FILENAME_START_OFFSET + (slotIndex * (FILENAME_LENGTH + FILENAME_SEPARATOR_LENGTH));
+            const filenameBytes = currentEEPROMData.slice(filenameStartInHeader, filenameStartInHeader + EXPORTED_FILENAME_LENGTH); 
+            const dataStartByte = SAVE_DATA_START_OFFSET + (slotIndex * SAVE_DATA_SIZE);
+            const dataEndByte = dataStartByte + SAVE_DATA_SIZE; 
+            if (dataEndByte > currentEEPROMData.length) {
+                document.getElementById('statusMessage').className = 'error';
+                document.getElementById('statusMessage').textContent = "Error: Save slot data exceeds file size. File might be corrupt.";
+                return;
+            }
+            const slotData = currentEEPROMData.slice(dataStartByte, dataEndByte);
+            const combinedData = new Uint8Array(EXPORTED_SAVE_FILE_SIZE);
+            combinedData.set(filenameBytes, 0); 
+            combinedData.set(slotData, EXPORTED_FILENAME_LENGTH); 
+            const slotName = slotNames[slotIndex];
+            const safeFilename = (slotName.replace(/[^a-z0-9_]/gi, '_') || `slot_${slotIndex + 1}`).toLowerCase();
+            const exportFilename = `${safeFilename}.gbmnsave`;
+            downloadFile(combinedData, exportFilename, 'application/octet-stream');
+            document.getElementById('statusMessage').className = 'success';
+            document.getElementById('statusMessage').textContent = `Slot ${slotIndex + 1} ('${slotName}') exported successfully as ${exportFilename}.`;
+        }
+        function handleSlotReplace(slotIndex, newSaveFile) {
+            if (!currentEEPROMData || !newSaveFile) return;
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const importedData = new Uint8Array(event.target.result);
+                if (importedData.length !== EXPORTED_SAVE_FILE_SIZE) {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = `Error: Imported file size is ${importedData.length} bytes. Expected ${EXPORTED_SAVE_FILE_SIZE} bytes (0x511).`;
+                    const fileInput = document.getElementById(`replaceSlotInput_${slotIndex}`);
+                    if(fileInput) fileInput.value = '';
+                    return;
+                }
+                const importedFilenameBytes = importedData.slice(0, EXPORTED_FILENAME_LENGTH);
+                const newSaveData = importedData.slice(EXPORTED_FILENAME_LENGTH); 
+                const saveStartByte = SAVE_DATA_START_OFFSET + (slotIndex * SAVE_DATA_SIZE);
+                currentEEPROMData.set(newSaveData, saveStartByte);
+                const filenameStartInHeader = FILENAME_START_OFFSET + (slotIndex * (FILENAME_LENGTH + FILENAME_SEPARATOR_LENGTH));
+                currentEEPROMData.set(importedFilenameBytes, filenameStartInHeader);
+                const newFilenameText = bytesToTrimmedString(importedFilenameBytes);
+                slotNames[slotIndex] = newFilenameText;
+                const friendlyName = getFriendlyGameName(newFilenameText);
+                const rawGameID = newFilenameText.length > 0 
+                    ? newFilenameText.substring(0, newFilenameText.length - 1).trim()
+                    : '[EMPTY]';
+                const slotContainer = document.getElementById(`slot-container-${slotIndex}`);
+                document.getElementById(`slot-name-${slotIndex}`).textContent = rawGameID; 
+                if (slotContainer) {
+                    const gameNameDiv = slotContainer.querySelector('.game-name');
+                    if (gameNameDiv) {
+                        gameNameDiv.textContent = friendlyName;
+                    }
+                }
+                slotModifiedStatus[slotIndex] = true;
+                slotContainer.classList.add('slot-modified');
+                updateExportButtonState(); 
+                document.getElementById('statusMessage').className = 'success';
+                document.getElementById('statusMessage').textContent = `Slot ${slotIndex + 1} updated with save file: ${newSaveFile.name}.`;
+                const fileInput = document.getElementById(`replaceSlotInput_${slotIndex}`);
+                if(fileInput) fileInput.value = '';
+            };
+            reader.readAsArrayBuffer(newSaveFile);
+        }
+        function exportModifiedEEPROM() {
+            if (!currentEEPROMData) {
+                 document.getElementById('statusMessage').className = 'error';
+                 document.getElementById('statusMessage').textContent = "Error: No EEPROM file loaded or modified to export.";
+                 return;
+            }
+            const filename = 'EEPROM01.PME';
+            downloadFile(currentEEPROMData, filename, 'application/octet-stream');
+            for (let i = 0; i < SAVE_SLOT_COUNT; i++) {
+                slotModifiedStatus[i] = false;
+                const container = document.getElementById(`slot-container-${i}`);
+                if (container) {
+                    container.classList.remove('slot-modified');
+                }
+            }
+            updateExportButtonState();
+            document.getElementById('statusMessage').className = 'success';
+            document.getElementById('statusMessage').textContent = `Modified EEPROM successfully exported as ${filename}.`;
+        }
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        function highlightPME(el) {
+            if (el.classList.contains('pme-drop-inactive')) return;
+            el.classList.add('drag-over-pme');
+        }
+        function unhighlightPME(el) {
+            el.classList.remove('drag-over-pme');
+        }
+        function highlightSAVE(el) {
+            el.classList.add('drag-over-save');
+        }
+        function unhighlightSAVE(el) {
+            el.classList.remove('drag-over-save');
+        }
+        function handleDrop(e) {
+            preventDefaults(e);
+            const droppedElement = e.currentTarget;
+            if (droppedElement.id === 'mainBody') {
+                unhighlightPME(droppedElement);
+                if (droppedElement.classList.contains('pme-drop-inactive')) {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = "A .PME file has already been loaded. Refresh the page to load a new one.";
+                    return;
+                }
+            } else if (droppedElement.classList.contains('slot-container')) {
+                unhighlightSAVE(droppedElement);
+            }
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length === 0) return;
+            const file = files[0];
+            const fileName = file.name.toLowerCase();
+            if (droppedElement.id === 'mainBody') {
+                if (fileName.endsWith('.pme')) {
+                    handleFileLoad(file);
+                } else {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = "The main area only accepts a **.pme** file.";
+                }
+            } else if (droppedElement.classList.contains('slot-container')) {
+                if (!currentEEPROMData) {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = "Please load a .PME file first.";
+                    return;
+                }
+                if (fileName.endsWith('.gbmnsave')) {
+                    const slotIndex = parseInt(droppedElement.dataset.slotIndex);
+                    if (!isNaN(slotIndex)) {
+                        handleSlotReplace(slotIndex, file);
+                    }
+                } else {
+                    document.getElementById('statusMessage').className = 'error';
+                    document.getElementById('statusMessage').textContent = `Not a valid save file!`;
+                }
+            }
+        }
+        const mainBody = document.getElementById('mainBody');
+        const pmeHandlers = {
+            dragenter: handleBodyDragEnter,
+            dragleave: handleBodyDragLeave,
+            dragover: handleBodyDragOver,
+            drop: handleDrop
+        };
+        function handleBodyDragEnter(e) {
+            preventDefaults(e);
+            if (e.target.closest('.slot-container') || mainBody.classList.contains('pme-drop-inactive')) return;
+            dragCounter++;
+            highlightPME(mainBody);
+        }
+        function handleBodyDragLeave(e) {
+            preventDefaults(e);
+            if (e.target.closest('.slot-container') || mainBody.classList.contains('pme-drop-inactive')) return;
+            if (dragCounter > 0) {
+                dragCounter--;
+            }
+            if (dragCounter === 0) {
+                 unhighlightPME(mainBody);
+            }
+        }
+        function handleBodyDragOver(e) {
+             preventDefaults(e);
+             if (e.target.closest('.slot-container') || mainBody.classList.contains('pme-drop-inactive')) return;
+             highlightPME(mainBody);
+        }
+        function handleSlotDragEnter(e) {
+            preventDefaults(e);
+            highlightSAVE(e.currentTarget);
+        }
+        function handleSlotDragLeave(e) {
+            preventDefaults(e);
+            unhighlightSAVE(e.currentTarget);
+        }
+        function handleSlotDragOver(e) {
+             preventDefaults(e);
+             highlightSAVE(e.currentTarget);
+        }
+        function setupPmeDragDrop(enable) {
+            if (enable) {
+                mainBody.addEventListener('dragenter', pmeHandlers.dragenter, false);
+                mainBody.addEventListener('dragleave', pmeHandlers.dragleave, false);
+                mainBody.addEventListener('dragover', pmeHandlers.dragover, false);
+                mainBody.addEventListener('drop', pmeHandlers.drop, false);
+                mainBody.classList.remove('pme-drop-inactive');
+            } else {
+                mainBody.removeEventListener('dragenter', pmeHandlers.dragenter, false);
+                mainBody.removeEventListener('dragleave', pmeHandlers.dragleave, false);
+                mainBody.removeEventListener('dragover', pmeHandlers.dragover, false);
+                mainBody.removeEventListener('drop', pmeHandlers.drop, false);
+                mainBody.classList.add('pme-drop-inactive'); 
+            }
+        }
+        function setupDragDropListeners() {
+            const slotsContainer = document.getElementById('slotsContainer');
+            setupPmeDragDrop(true); 
+            const observer = new MutationObserver((mutationsList, observer) => {
+                for (const mutation of mutationsList) {
+                    if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.nodeType === 1 && node.classList.contains('slot-container')) {
+                                node.addEventListener('dragenter', handleSlotDragEnter, false);
+                                node.addEventListener('dragleave', handleSlotDragLeave, false);
+                                node.addEventListener('dragover', handleSlotDragOver, false);
+                                node.addEventListener('drop', handleDrop, false);
+                            }
+                        });
+                    }
+                }
+            });
+            observer.observe(slotsContainer, { childList: true, subtree: true });
+        }
+        function initPage() {
+            setupDragDropListeners();
+            updateExportButtonState(); 
+        }
+        document.addEventListener('DOMContentLoaded', initPage);
+        document.addEventListener('dragleave', (e) => {
+            if (e.clientX <= 0 || e.clientY <= 0 || (e.clientX >= window.innerWidth || e.clientY >= window.innerHeight)) {
+                dragCounter = 0;
+                unhighlightPME(document.getElementById('mainBody'));
+            }
+        });
+    </script>
+</body>
+</html>
